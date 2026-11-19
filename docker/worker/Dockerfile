@@ -44,6 +44,32 @@ RUN mkdir -p /usr/local/lib/java \
     && curl -fsSL https://repo1.maven.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar \
        -o /usr/local/lib/java/gson.jar
 
+# ── 3c. Precompiled <bits/stdc++.h> (C++ compile ~2s -> ~0.5s) ────────────
+# Built with EXACTLY the flags in src/languages/cpp.js. GCC looks for
+# bits/stdc++.h.gch in each -I directory before the real header, uses it when
+# the flags match, and silently falls back to the normal header otherwise.
+RUN mkdir -p /usr/local/include/pch/bits \
+    && printf '#include <bits/stdc++.h>\n' > /tmp/pch.h \
+    && g++ -O2 -std=c++17 -pipe -x c++-header /tmp/pch.h -o /usr/local/include/pch/bits/stdc++.h.gch \
+    && rm /tmp/pch.h \
+    && printf '#include <bits/stdc++.h>\nint main(){std::vector<int> v{1};std::cout<<v[0];}\n' > /tmp/t.cpp \
+    && g++ -O2 -std=c++17 -pipe -I/usr/local/include/pch -I/usr/local/include -H -o /tmp/t /tmp/t.cpp 2>&1 | head -1 | grep -q 'stdc++.h.gch' \
+    && rm -f /tmp/t /tmp/t.cpp
+
+# ── 3d. AppCDS archive for javac (Java compile ~1.7s -> ~0.8s) ────────────
+# Records the compiler's loaded classes so later javac runs map them instead
+# of loading/verifying ~1000 classes. JVM flags match src/languages/java.js.
+RUN mkdir -p /tmp/cds && cd /tmp/cds \
+    && printf 'import java.util.*;\nimport java.io.*;\npublic class Main {\n  public static void main(String[] a) throws IOException {\n    BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\n    List<Integer> l = new ArrayList<>(); Map<String,Integer> m = new HashMap<>();\n    Deque<int[]> q = new ArrayDeque<>(); PriorityQueue<Long> pq = new PriorityQueue<>();\n    StringBuilder sb = new StringBuilder(); Arrays.sort(new int[]{3,1});\n    l.stream().mapToInt(Integer::intValue).sum(); System.out.println(sb.append(l.size() + m.size() + q.size() + pq.size()));\n  }\n}\n' > Main.java \
+    && javac -J-XX:ArchiveClassesAtExit=/usr/local/lib/java/javac.jsa -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC \
+       -cp .:/usr/local/lib/java/* Main.java \
+    && test -s /usr/local/lib/java/javac.jsa \
+    && chmod 644 /usr/local/lib/java/javac.jsa \
+    && cd / && rm -rf /tmp/cds
+
+# Compiled-build cache location (wiped on worker start; see BuildCache.js)
+RUN mkdir -p /var/cache/codebox/builds
+
 # ── 4. Compile and install isolate (binaries only, skip man pages) ─────────
 # Pinned: this used to clone HEAD, so an upstream change silently broke the
 # image build. isolate needs libseccomp-dev (installed above) for the syscall

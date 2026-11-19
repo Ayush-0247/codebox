@@ -34,6 +34,7 @@ services:
       - PORT=3000
       - BODY_LIMIT=50mb
       - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-200}
+      - BATCH_MAX_TESTCASES=${BATCH_MAX_TESTCASES:-200}
     depends_on:
       - redis
     restart: always
@@ -60,6 +61,8 @@ services:
       - DEFAULT_MEMORY_LIMIT=${DEFAULT_MEMORY_LIMIT:-256000}
       - MAX_MEMORY_LIMIT=${MAX_MEMORY_LIMIT:-512000}
       - RESULT_CACHE_TTL=${RESULT_CACHE_TTL:-1800}
+      - BUILD_CACHE_ENABLED=${BUILD_CACHE_ENABLED:-true}
+      - BUILD_CACHE_MAX_MB=${BUILD_CACHE_MAX_MB:-512}
     depends_on:
       - redis
     restart: always

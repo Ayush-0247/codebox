@@ -75,6 +75,61 @@ const batchSubmissionSchema = Joi.object({
   submissions: Joi.array().items(submissionSchema).min(1).max(20).required(),
 });
 
+// Batch execution (one program, many testcases) validation.
+// Limits are clamped to the configured maximums by the route, not rejected.
+const batchLimitsSchema = Joi.object({
+  cpu_time_limit: Joi.number().min(0),
+  wall_time_limit: Joi.number().min(0),
+  memory_limit: Joi.number().min(0),
+  max_processes_and_or_threads: Joi.number().min(1),
+  max_file_size: Joi.number().min(0),
+}).default({});
+
+const batchExecutionSchema = Joi.object({
+  language_id: Joi.number().integer().required().custom((value, helpers) => {
+    if (!isValidLanguageId(value) || value === MULTI_FILE_LANGUAGE_ID) {
+      return helpers.error('any.invalid');
+    }
+    return value;
+  }),
+  source_code: Joi.string().min(1).max(config.execution.maxSourceSize).required(),
+  testcases: Joi.array()
+    .items(Joi.object({
+      stdin: Joi.string().allow('', null).default(''),
+      // Optional ordering group (e.g. difficulty tier) used by stop_on_failure.
+      group: Joi.number().integer().min(0).default(0),
+    }))
+    .min(1)
+    .max(config.batch.maxTestcases)
+    .required(),
+  // Skip testcases in later groups once one fails to complete (crash/TLE/MLE).
+  stop_on_failure: Joi.boolean().default(false),
+  limits: batchLimitsSchema,
+  compiler_options: Joi.string().allow('', null).default(null),
+  command_line_arguments: Joi.string().allow('', null).default(null),
+});
+
+/**
+ * Validate batch execution request (POST /batches)
+ */
+export function validateBatchExecution(req, res, next) {
+  const { error, value } = batchExecutionSchema.validate(req.body, {
+    abortEarly: false,
+    stripUnknown: true,
+  });
+
+  if (error) {
+    return res.status(422).json({
+      error: 'Validation Error',
+      message: error.details.map(d => d.message).join(', '),
+      details: error.details,
+    });
+  }
+
+  req.validatedBody = value;
+  next();
+}
+
 /**
  * Validate submission request
  */
@@ -150,6 +205,7 @@ export function sanitizeCommandLineArgs(args) {
 export default {
   validateSubmission,
   validateBatchSubmission,
+  validateBatchExecution,
   sanitizeCompilerOptions,
   sanitizeCommandLineArgs,
 };

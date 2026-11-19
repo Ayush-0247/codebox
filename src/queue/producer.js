@@ -87,6 +87,46 @@ export async function addSubmission(submission) {
 }
 
 /**
+ * Add a batch (one program, many testcases) to the queue.
+ * The stored record omits source/stdin to keep polling responses small.
+ */
+export async function addBatch(batch) {
+  if (!redis || !submissionQueue) {
+    throw new Error('Queue not initialized');
+  }
+
+  await redis.setex(
+    `batch:${batch.batchId}`,
+    config.cache.resultTtl,
+    JSON.stringify({
+      batchId: batch.batchId,
+      status: 'queued',
+      language_id: batch.language_id,
+      testcaseCount: batch.testcases.length,
+      created_at: batch.created_at,
+      finished_at: null,
+      results: [],
+    })
+  );
+
+  await submissionQueue.add('batch', batch, { jobId: `batch-${batch.batchId}` });
+
+  logger.debug({ event: 'batch_queued', batchId: batch.batchId, testcases: batch.testcases.length });
+  return batch;
+}
+
+/**
+ * Get batch state from cache
+ */
+export async function getBatch(batchId) {
+  if (!redis) {
+    throw new Error('Redis not initialized');
+  }
+  const data = await redis.get(`batch:${batchId}`);
+  return data ? JSON.parse(data) : null;
+}
+
+/**
  * Get submission from cache
  */
 export async function getSubmission(token) {
@@ -197,6 +237,8 @@ export default {
   getRedis,
   getQueue,
   addSubmission,
+  addBatch,
+  getBatch,
   getSubmission,
   updateSubmission,
   deleteSubmission,

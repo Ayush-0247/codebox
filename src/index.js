@@ -1,5 +1,6 @@
 import { startServer } from './api/server.js';
 import { initializeQueue, closeQueue } from './queue/producer.js';
+import { closeBatchEvents } from './queue/batchEvents.js';
 import logger from './utils/logger.js';
 import config from './utils/config.js';
 
@@ -26,6 +27,7 @@ async function main() {
         logger.info('HTTP server closed');
 
         await closeQueue();
+        await closeBatchEvents();
         logger.info('Queue connections closed');
 
         process.exit(0);

@@ -32,10 +32,29 @@ const config = {
 
   worker: {
     concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 4,
+    warmup: (process.env.WORKER_WARMUP || 'true').toLowerCase() !== 'false',
   },
 
   cache: {
     resultTtl: parseInt(process.env.RESULT_CACHE_TTL) || 3600,
+  },
+
+  // Compiled-build cache: identical code (Run -> Submit, retries, batches) skips the compiler.
+  buildCache: {
+    enabled: (process.env.BUILD_CACHE_ENABLED || 'true').toLowerCase() !== 'false',
+    dir: process.env.BUILD_CACHE_DIR || '/var/cache/codebox/builds',
+    maxBytes: (parseInt(process.env.BUILD_CACHE_MAX_MB) || 512) * 1024 * 1024,
+    maxEntries: parseInt(process.env.BUILD_CACHE_MAX_ENTRIES) || 2000,
+  },
+
+  // Batch execution: compile once, run many testcases.
+  batch: {
+    maxTestcases: parseInt(process.env.BATCH_MAX_TESTCASES) || 200,
+    // Sandboxes used in parallel per batch; match the worker's CPU count.
+    parallelism: parseInt(process.env.BATCH_PARALLELISM) || 2,
+    // Longest time a ?wait=true request is held open before answering with
+    // the current (unfinished) state; clients then simply ask again.
+    maxWaitMs: parseInt(process.env.BATCH_MAX_WAIT_MS) || 25000,
   },
 
   rateLimit: {

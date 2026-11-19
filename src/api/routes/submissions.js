@@ -67,7 +67,7 @@ function formatSubmission(submission, options = {}) {
  */
 async function waitForResult(token, maxWait = 30000) {
   const start = Date.now();
-  const pollInterval = 100;
+  const pollInterval = 50;
 
   while (Date.now() - start < maxWait) {
     const result = await getSubmission(token);

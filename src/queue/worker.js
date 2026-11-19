@@ -3,6 +3,9 @@ import Redis from 'ioredis';
 import config from '../utils/config.js';
 import logger from '../utils/logger.js';
 import { executeCode, compareOutput } from './jobs/executeCode.js';
+import { executeBatch } from './jobs/executeBatch.js';
+import { publishBatchDone } from './batchEvents.js';
+import { warmUpExecutor } from './warmup.js';
 import { getStatusById } from '../languages/index.js';
 
 let redis = null;
@@ -49,9 +52,40 @@ async function sendCallback(callbackUrl, submission) {
 }
 
 /**
- * Process a submission job
+ * Process a batch job (one program, many testcases)
+ */
+async function processBatchJob(job) {
+  const batch = job.data;
+  const key = `batch:${batch.batchId}`;
+  const base = {
+    batchId: batch.batchId,
+    language_id: batch.language_id,
+    testcaseCount: batch.testcases.length,
+    created_at: batch.created_at,
+  };
+
+  await redis.setex(key, config.cache.resultTtl, JSON.stringify({
+    ...base, status: 'processing', finished_at: null, results: [],
+  }));
+
+  const outcome = await executeBatch(batch);
+
+  await redis.setex(key, config.cache.resultTtl, JSON.stringify({
+    ...base,
+    ...outcome,
+    finished_at: new Date().toISOString(),
+  }));
+  await publishBatchDone(redis, batch.batchId);
+
+  return { status: outcome.status };
+}
+
+/**
+ * Process a queue job
  */
 async function processJob(job) {
+  if (job.name === 'batch') return processBatchJob(job);
+
   const submission = job.data;
   const token = submission.token;
 
@@ -144,6 +178,12 @@ export async function startWorker() {
     event: 'worker_started',
     concurrency: config.worker.concurrency,
   });
+
+  // Load compilers/runtimes (C++ precompiled header, javac class archive, ...)
+  // into memory now, so the first real submission after a restart is not slow.
+  if (config.worker.warmup) {
+    warmUpExecutor().catch((err) => logger.warn({ err: err.message }, 'Warm-up failed'));
+  }
 
   return worker;
 }

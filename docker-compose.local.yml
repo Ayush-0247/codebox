@@ -1,0 +1,61 @@
+# Run CodeBox on your own machine with the same sandbox (isolate) as production.
+#
+#   docker compose -f docker-compose.local.yml up -d --build
+#   curl http://localhost:2358/health
+#
+# Point the Calibr8 backend at it (env vars override backend/.env):
+#   CODEBOX_URL=http://localhost:2358  CODEBOX_TOKEN=local-dev-token
+#
+# Worker CPU/concurrency default to the production values so timings are
+# comparable; override with LOCAL_WORKER_CPUS / LOCAL_WORKER_CONCURRENCY.
+name: codebox-local
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    ports:
+      - "2358:3000"
+    environment:
+      - NODE_ENV=development
+      - REDIS_URL=redis://redis:6379
+      - AUTH_TOKEN=local-dev-token
+      - PORT=3000
+      - BODY_LIMIT=50mb
+      - RATE_LIMIT_MAX_REQUESTS=100000
+      - BATCH_MAX_TESTCASES=200
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    command: node src/queue/worker.js
+    # isolate needs cgroup v2 write access (Docker Desktop/WSL2 and Linux both work)
+    privileged: true
+    cgroup: host
+    environment:
+      - NODE_ENV=development
+      - REDIS_URL=redis://redis:6379
+      - EXECUTOR_TYPE=isolate
+      - WORKER_CONCURRENCY=${LOCAL_WORKER_CONCURRENCY:-2}
+      - BATCH_PARALLELISM=${LOCAL_WORKER_CONCURRENCY:-2}
+      - DEFAULT_MEMORY_LIMIT=256000
+      - MAX_MEMORY_LIMIT=512000
+      - BUILD_CACHE_ENABLED=true
+      - BUILD_CACHE_MAX_MB=512
+    depends_on:
+      - redis
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '${LOCAL_WORKER_CPUS:-1.5}'
+          memory: 4G

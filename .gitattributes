@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers: always check them out with LF,
+# otherwise Windows (core.autocrlf=true) breaks them ("exec /entrypoint.sh:
+# no such file or directory").
+*.sh text eol=lf
