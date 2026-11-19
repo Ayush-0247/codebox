@@ -63,6 +63,8 @@ services:
       - RESULT_CACHE_TTL=${RESULT_CACHE_TTL:-1800}
       - BUILD_CACHE_ENABLED=${BUILD_CACHE_ENABLED:-true}
       - BUILD_CACHE_MAX_MB=${BUILD_CACHE_MAX_MB:-512}
+      # Testcases of one batch run in parallel, capped at the host's CPU count.
+      - BATCH_PARALLELISM=${BATCH_PARALLELISM:-2}
     depends_on:
       - redis
     restart: always

@@ -21,6 +21,10 @@ function allocateBoxId() {
   return id;
 }
 
+function hostCpuCount() {
+  return typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+}
+
 function truncate(text) {
   if (!text) return text;
   return text.length > MAX_OUTPUT_CHARS ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n[truncated]` : text;
@@ -200,7 +204,10 @@ class IsolateExecutor {
       // so limits and measurements stay per-testcase).
       const total = batch.testcases.length;
       const lanes = [{ boxId, boxDir }];
-      const laneCount = Math.max(1, Math.min(config.batch.parallelism, total));
+      // Never run more testcases at once than there are CPU cores: on a 1-core
+      // host two parallel runs each get half a core, and a correct solution
+      // near the CPU limit could then exceed its wall-clock limit (false TLE).
+      const laneCount = Math.max(1, Math.min(config.batch.parallelism, total, hostCpuCount()));
       for (let i = 1; i < laneCount; i++) {
         const id = allocateBoxId();
         extraBoxIds.push(id);
