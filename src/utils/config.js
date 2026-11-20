@@ -39,6 +39,22 @@ const config = {
     resultTtl: parseInt(process.env.RESULT_CACHE_TTL) || 3600,
   },
 
+  // BullMQ keeps a copy of every finished job - including its source code and
+  // stdin - for inspection. Results are served from the submission:/batch:
+  // keys, never from these copies, so they are kept only briefly; otherwise
+  // large submissions stay in Redis (256 MB, noeviction) until 100 newer jobs
+  // push them out. Ages are in seconds.
+  queue: {
+    keepCompleted: {
+      age: parseInt(process.env.QUEUE_KEEP_COMPLETED_AGE) || 600,
+      count: parseInt(process.env.QUEUE_KEEP_COMPLETED_COUNT) || 100,
+    },
+    keepFailed: {
+      age: parseInt(process.env.QUEUE_KEEP_FAILED_AGE) || 86400,
+      count: parseInt(process.env.QUEUE_KEEP_FAILED_COUNT) || 100,
+    },
+  },
+
   // Compiled-build cache: identical code (Run -> Submit, retries, batches) skips the compiler.
   buildCache: {
     enabled: (process.env.BUILD_CACHE_ENABLED || 'true').toLowerCase() !== 'false',

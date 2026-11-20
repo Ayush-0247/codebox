@@ -1,5 +1,5 @@
 import client from 'prom-client';
-import { getQueueStats, getWorkerStats } from '../queue/producer.js';
+import { getQueueStats, getWorkerStats, getRedisMemory } from '../queue/producer.js';
 
 // Create a Registry
 const register = new client.Registry();
@@ -53,6 +53,19 @@ const queueFailed = new client.Gauge({
   registers: [register],
 });
 
+// The queue lives in Redis (noeviction): when Redis is full, submissions fail.
+const redisUsedMemory = new client.Gauge({
+  name: 'codebox_redis_used_memory_bytes',
+  help: 'Memory used by Redis in bytes',
+  registers: [register],
+});
+
+const redisMaxMemory = new client.Gauge({
+  name: 'codebox_redis_maxmemory_bytes',
+  help: 'Redis maxmemory limit in bytes (0 = no limit)',
+  registers: [register],
+});
+
 // Update queue metrics before each scrape
 register.setDefaultLabels({ service: 'codebox' });
 
@@ -68,6 +81,13 @@ async function updateQueueMetrics() {
     activeWorkers.set(workers.length);
   } catch {
     // Queue might not be ready yet
+  }
+  try {
+    const memory = await getRedisMemory();
+    if (Number.isFinite(memory?.used_memory_bytes)) redisUsedMemory.set(memory.used_memory_bytes);
+    if (Number.isFinite(memory?.maxmemory_bytes)) redisMaxMemory.set(memory.maxmemory_bytes);
+  } catch {
+    // Redis might not be ready yet
   }
 }
 

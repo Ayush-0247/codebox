@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import os from 'os';
 import { getAllStatuses } from '../../languages/index.js';
-import { getQueueStats, getWorkerStats } from '../../queue/producer.js';
+import { getQueueStats, getWorkerStats, getRedisMemory } from '../../queue/producer.js';
 import { getSystemCapabilities, getExecutorType } from '../../executor/ExecutorFactory.js';
 import config from '../../utils/config.js';
 
@@ -109,8 +109,13 @@ router.get('/config_info', (req, res) => {
  */
 router.get('/statistics', async (req, res) => {
   try {
-    const stats = await getQueueStats();
-    res.json(stats);
+    const [stats, redisMemory] = await Promise.all([
+      getQueueStats(),
+      getRedisMemory().catch(() => null),
+    ]);
+    // Redis memory is reported alongside the queue counts: the queue lives in
+    // Redis (noeviction), so a full Redis makes every submission fail.
+    res.json(redisMemory ? { ...stats, redis: redisMemory } : stats);
   } catch (error) {
     res.json({
       submissions: { total: 0, in_queue: 0, processing: 0, completed: 0 },

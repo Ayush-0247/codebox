@@ -7,6 +7,7 @@ import { executeBatch } from './jobs/executeBatch.js';
 import { publishBatchDone } from './batchEvents.js';
 import { warmUpExecutor } from './warmup.js';
 import { getStatusById } from '../languages/index.js';
+import { jobRetentionOptions } from './producer.js';
 
 let redis = null;
 let worker = null;
@@ -149,8 +150,8 @@ export async function startWorker() {
   worker = new Worker('submissions', processJob, {
     connection: redis,
     concurrency: config.worker.concurrency,
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 1000 },
+    // Fallback for jobs created without retention options (same values).
+    ...jobRetentionOptions(),
   });
 
   worker.on('completed', (job, result) => {

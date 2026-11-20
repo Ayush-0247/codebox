@@ -25,23 +25,59 @@ export async function initializeQueue() {
 
   submissionQueue = new Queue('submissions', {
     connection: redis,
-    defaultJobOptions: {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 1000,
-      },
-      removeOnComplete: {
-        count: 100,
-      },
-      removeOnFail: {
-        count: 1000,
-      },
-    },
+    defaultJobOptions: defaultJobOptions(),
   });
 
   logger.info('BullMQ queue initialized');
   return submissionQueue;
+}
+
+/** Options every queued job gets. */
+export function defaultJobOptions() {
+  return {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 1000,
+    },
+    // Job-level options win over the worker's (BullMQ), so both use the same values.
+    ...jobRetentionOptions(),
+  };
+}
+
+/** How long BullMQ keeps finished jobs (see config.queue). */
+export function jobRetentionOptions(queueConfig = config.queue) {
+  return {
+    removeOnComplete: { ...queueConfig.keepCompleted },
+    removeOnFail: { ...queueConfig.keepFailed },
+  };
+}
+
+/** Parses the text of a Redis INFO reply into { key: number | string }. */
+export function parseRedisInfo(text) {
+  const out = {};
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue;
+    const i = line.indexOf(':');
+    if (i <= 0) continue;
+    const value = line.slice(i + 1).trim();
+    out[line.slice(0, i)] = /^-?\d+(\.\d+)?$/.test(value) ? Number(value) : value;
+  }
+  return out;
+}
+
+/** Redis memory usage and limit (bytes and human-readable), or null without a connection. */
+export async function getRedisMemory(client = redis) {
+  if (!client) return null;
+  const info = parseRedisInfo(await client.info('memory'));
+  return {
+    used_memory_bytes: info.used_memory ?? null,
+    used_memory_peak_bytes: info.used_memory_peak ?? null,
+    maxmemory_bytes: info.maxmemory ?? null,
+    used_memory_human: info.used_memory_human ?? null,
+    maxmemory_human: info.maxmemory_human ?? null,
+    maxmemory_policy: info.maxmemory_policy ?? null,
+  };
 }
 
 /**
