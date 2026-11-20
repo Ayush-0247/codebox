@@ -582,8 +582,16 @@ class IsolateExecutor {
    */
   buildBatchCaseResult(run, index, limits) {
     let status;
-    if (run.oomKilled) status = 'memory_limit_exceeded';
-    else if (run.isoStatus === 'TO') status = 'time_limit_exceeded';
+    // isolate's cg-oom-killed reflects the box cgroup's cumulative OOM counter,
+    // and a batch lane reuses one box for many testcases: after one OOM kill
+    // the flag stays set for every later run in that lane. Only trust it for a
+    // run that was actually SIGKILLed and did not hit the time limit. Programs
+    // run under `/bin/sh -c`, so a SIGKILLed program usually shows up as the
+    // shell exiting with 137 (128 + 9) rather than as a signal.
+    const sigkilled = run.exitSignal === 9 || (!run.exitSignal && run.exitCode === 137);
+    const oomKilled = Boolean(run.oomKilled) && sigkilled && run.isoStatus !== 'TO';
+    if (run.isoStatus === 'TO') status = 'time_limit_exceeded';
+    else if (oomKilled) status = 'memory_limit_exceeded';
     else if (run.isoStatus === 'SG') {
       if (run.exitSignal === 25) status = 'output_limit_exceeded';
       else if (run.exitSignal === 9 && run.memory && run.memory >= limits.memory_limit * 0.95) status = 'memory_limit_exceeded';

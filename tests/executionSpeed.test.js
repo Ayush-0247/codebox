@@ -50,6 +50,10 @@ async function makeExecutor() {
     if (stdin === 'crash') return { ...base, isoStatus: 'SG', exitSignal: 11, exitCode: 0 };
     if (stdin === 'loop') return { ...base, isoStatus: 'TO', time: 2.0 };
     if (stdin === 'oom') return { ...base, isoStatus: 'SG', exitSignal: 9, oomKilled: true };
+    // Real runs go through `/bin/sh -c`: the shell reports a killed/crashed
+    // program as a non-zero exit (128 + signal), not as a signal.
+    if (stdin === 'oom-sh') return { ...base, isoStatus: 'RE', exitCode: 137, stderr: 'Killed\n', oomKilled: true };
+    if (stdin === 'crash-sh') return { ...base, isoStatus: 'RE', exitCode: 139, stderr: 'Segmentation fault\n' };
     return { ...base, stdout: `${stdin}|${files.join(',')}` };
   };
   return ex;
@@ -136,6 +140,34 @@ test('batch: compiles once, runs every testcase in a clean box, maps verdicts', 
   assert.equal(out.results[0].timeMs, 4);
   assert.equal(out.results[2].timeMs, 2000);
   assert.deepEqual(out.results.map((r) => r.index), [0, 1, 2, 3, 4]);
+});
+
+test('batch: a memory-limit kill does not leak into later testcases of the same box', async () => {
+  const ex = await makeExecutor();
+  // isolate reports cg-oom-killed from the box cgroup's cumulative counter:
+  // once a run in a box was OOM-killed, every later run in that box reports it.
+  const stubRun = ex.runIsolate;
+  const oomBoxes = new Set();
+  ex.runIsolate = async (boxId, workDir, opts) => {
+    const run = await stubRun(boxId, workDir, opts);
+    if (run.oomKilled) oomBoxes.add(boxId);
+    return oomBoxes.has(boxId) ? { ...run, oomKilled: true } : run;
+  };
+  const out = await ex.executeBatch({
+    batchId: 'b-oom', language: cpp, language_id: 54, source_code: 'int main(){/*oom-sticky*/}',
+    memory_limit: 256000, max_processes_and_or_threads: 60,
+    limits: { cpu_time_limit: 1, wall_time_limit: 2, memory_limit: 256000, max_processes_and_or_threads: 60 },
+    testcases: [
+      { stdin: 'oom-sh' }, { stdin: '1 2' }, { stdin: 'loop' }, { stdin: 'crash-sh' },
+      { stdin: 'crash' }, { stdin: 'oom' }, { stdin: '3 4' },
+    ],
+  });
+  assert.deepEqual(out.results.map((r) => r.status), [
+    'memory_limit_exceeded', // shell-wrapped OOM kill (exit 137) is still detected
+    'completed', 'time_limit_exceeded', 'runtime_error', 'runtime_error',
+    'memory_limit_exceeded', // a genuine later OOM kill
+    'completed',
+  ]);
 });
 
 test('batch: compile error reported once for the whole batch', async () => {
