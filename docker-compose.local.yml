@@ -19,12 +19,20 @@ services:
     build:
       context: .
       dockerfile: docker/api/Dockerfile
+    # Loopback only: the token below is public (it is in this repository), so
+    # the API must never be reachable from the LAN or the internet.
     ports:
-      - "2358:3000"
+      - "127.0.0.1:2358:3000"
     environment:
       - NODE_ENV=development
       - REDIS_URL=redis://redis:6379
-      - AUTH_TOKEN=local-dev-token
+      # Set CODEBOX_LOCAL_TOKEN (and the backend's CODEBOX_TOKEN) to a private
+      # value; the default is public.
+      - AUTH_TOKEN=${CODEBOX_LOCAL_TOKEN:-local-dev-token}
+      # DNS-rebinding protection: only these Host headers are served.
+      - ALLOWED_HOSTS=${CODEBOX_LOCAL_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1],api,host.docker.internal}
+      # Clients connect directly (no reverse proxy).
+      - TRUST_PROXY=false
       - PORT=3000
       - BODY_LIMIT=50mb
       - RATE_LIMIT_MAX_REQUESTS=100000
@@ -51,6 +59,8 @@ services:
       - MAX_MEMORY_LIMIT=512000
       - BUILD_CACHE_ENABLED=true
       - BUILD_CACHE_MAX_MB=512
+      # Same as production: the Node.js worker drops root after cgroup setup.
+      - WORKER_USER=${WORKER_USER-codebox}
     depends_on:
       - redis
     restart: unless-stopped

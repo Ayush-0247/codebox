@@ -8,7 +8,13 @@ const MULTI_FILE_LANGUAGE_ID = 89;
 
 // Submission validation schema
 const submissionSchema = Joi.object({
-  source_code: Joi.string().max(config.execution.maxSourceSize).allow('', null).default(null),
+  // N3: a submission must carry a program. Multi-file programs (language 89)
+  // bring theirs in additional_files instead.
+  source_code: Joi.string().max(config.execution.maxSourceSize).when('language_id', {
+    is: MULTI_FILE_LANGUAGE_ID,
+    then: Joi.allow('', null).default(null),
+    otherwise: Joi.string().min(1).required(),
+  }),
   language_id: Joi.number().integer().required().custom((value, helpers) => {
     if (!isValidLanguageId(value)) {
       return helpers.error('any.invalid');
@@ -104,6 +110,9 @@ const batchExecutionSchema = Joi.object({
     .required(),
   // Skip testcases in later groups once one fails to complete (crash/TLE/MLE).
   stop_on_failure: Joi.boolean().default(false),
+  // Duration cap for the whole batch (round 2): after this many ms of running
+  // testcases, the rest are skipped. Clamped to BATCH_MAX_DURATION_MS.
+  max_duration_ms: Joi.number().integer().min(500).max(3600000),
   limits: batchLimitsSchema,
   compiler_options: Joi.string().allow('', null).default(null),
   command_line_arguments: Joi.string().allow('', null).default(null),

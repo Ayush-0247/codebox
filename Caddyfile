@@ -16,6 +16,16 @@
     handle /metrics/* {
         respond "Unauthorized" 401
     }
+    # The API's own /metrics is for the internal Prometheus scrape only.
+    handle /metrics {
+        respond "Not Found" 404
+    }
+
+    # Size ceiling before anything reaches the API (which additionally
+    # enforces BODY_LIMIT, after authentication).
+    request_body {
+        max_size 10MB
+    }
 
     # Reverse proxy to API
     reverse_proxy api:3000

@@ -5,8 +5,12 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      # Blank/unset DOMAIN => ":80" => plain HTTP on the server's IP, no SSL.
-      - SITE_ADDRESS=${DOMAIN:-:80}
+      # DOMAIN is required: Caddy then serves HTTPS with an automatic
+      # certificate. The API carries the CodeBox token, users' source code and
+      # hidden testcase input, so plain HTTP on the server's IP is no longer
+      # an option (SA-H3). For a private-network-only setup, put the backend
+      # and CodeBox on the same private network instead of publishing ports.
+      - "SITE_ADDRESS=${DOMAIN:?DOMAIN must be set to the hostname that points at this server (automatic HTTPS)}"
       # Must be non-empty: Caddy's header matcher fails to parse on a blank
       # value and the container crashloops with "malformed header matcher".
       - "METRICS_TOKEN=${METRICS_TOKEN:?METRICS_TOKEN must be set (generate one with openssl rand -hex 16)}"
@@ -32,8 +36,17 @@ services:
       - REDIS_URL=redis://redis:6379
       - "AUTH_TOKEN=${AUTH_TOKEN:?AUTH_TOKEN must be set - an empty token disables auth entirely}"
       - PORT=3000
-      - BODY_LIMIT=50mb
+      # The backend's largest request (multi-case harness) is ~4 MB; bodies
+      # are only parsed after authentication (SA-M8).
+      - BODY_LIMIT=${BODY_LIMIT:-8mb}
+      # Exactly one proxy (Caddy) in front of the API: real client IPs for
+      # the unauthenticated per-IP budget (SA-H4).
+      - TRUST_PROXY=1
+      # Per authenticated client (token).
       - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-200}
+      # Per IP, for requests without a valid token; never shared with the
+      # authenticated budget.
+      - RATE_LIMIT_UNAUTHENTICATED_MAX=${RATE_LIMIT_UNAUTHENTICATED_MAX:-60}
       # Same result TTL as the worker (the API writes submission:/batch: keys too).
       - RESULT_CACHE_TTL=${RESULT_CACHE_TTL:-1800}
       - QUEUE_KEEP_COMPLETED_AGE=${QUEUE_KEEP_COMPLETED_AGE:-600}
@@ -75,6 +88,12 @@ services:
       - BUILD_CACHE_MAX_MB=${BUILD_CACHE_MAX_MB:-512}
       # Testcases of one batch run in parallel, capped at the host's CPU count.
       - BATCH_PARALLELISM=${BATCH_PARALLELISM:-2}
+      # The Node.js worker drops root after cgroup setup; sandboxes are still
+      # created by the setuid isolate binary (docker/worker/entrypoint.sh).
+      # Set WORKER_USER= (empty) to run it as root as before.
+      - WORKER_USER=${WORKER_USER-codebox}
+      # Program output kept per run (Redis holds every byte until deleted).
+      - MAX_OUTPUT_CHARS=${MAX_OUTPUT_CHARS:-65536}
     depends_on:
       - redis
     restart: always
@@ -98,7 +117,7 @@ services:
           memory: ${REDIS_MEMORY:-384M}
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.53.0
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -114,11 +133,11 @@ services:
           memory: ${PROMETHEUS_MEMORY:-512M}
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.1.0
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - "GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set (no default admin password)}"
       - GF_USERS_ALLOW_SIGN_UP=false
     restart: always
     deploy:

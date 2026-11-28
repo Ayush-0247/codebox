@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { validateSubmission, validateBatchSubmission, sanitizeCompilerOptions, sanitizeCommandLineArgs } from '../middleware/validation.js';
 import { addSubmission, getSubmission, deleteSubmission } from '../../queue/producer.js';
+import { tenantFromRequest } from '../../queue/tenants.js';
 import { getLanguageById, getStatusById } from '../../languages/index.js';
 import { decodeIfNeeded, encodeIfNeeded } from '../../utils/base64.js';
 import logger from '../../utils/logger.js';
@@ -88,6 +89,7 @@ async function waitForResult(token, maxWait = 30000) {
  */
 router.post('/batch', validateBatchSubmission, async (req, res, next) => {
   try {
+    const tenant = tenantFromRequest(req);
     const { submissions } = req.validatedBody;
     const base64Encoded = req.query.base64_encoded === 'true';
 
@@ -133,7 +135,9 @@ router.post('/batch', validateBatchSubmission, async (req, res, next) => {
         exit_signal: null,
       };
 
-      await addSubmission(submission);
+      // Legacy multi-submission: budget and priority per tenant, but no per-job
+      // reservation (each element is its own job).
+      await addSubmission(submission, { tenant, reserve: false });
       results.push({ token: submission.token });
     }
 
@@ -246,7 +250,7 @@ router.post('/', validateSubmission, async (req, res, next) => {
     };
 
     // Add to queue
-    await addSubmission(submission);
+    await addSubmission(submission, { tenant: tenantFromRequest(req) });
 
     logger.info({
       event: 'submission_created',

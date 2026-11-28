@@ -1,5 +1,6 @@
 import { execFile } from 'child_process';
 import fs from 'fs/promises';
+import { constants as FS } from 'fs';
 import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
@@ -11,7 +12,90 @@ import { BuildCache, copyBuildTree } from './BuildCache.js';
 const execFileAsync = promisify(execFile);
 
 const MULTI_FILE_LANGUAGE_ID = 89;
-const MAX_OUTPUT_CHARS = 65536;
+const maxOutputChars = () => config.output.maxChars;
+
+// ── Host-side file access to a sandbox's box directory (SA-H5) ─────────────
+// The sandboxed program owns /box and can replace any file in it with a
+// symlink, FIFO or device node while it runs. This process runs as root in a
+// privileged container, so it must never follow such an entry: a symlinked
+// _stdout.txt would otherwise return any file of the worker (other users'
+// code, other boxes' testcases), and a symlinked _stdin.txt would let the
+// worker overwrite any file.
+
+/** Reads at most maxBytes of a regular file; anything else (symlink, FIFO, missing) reads as ''. */
+export async function readBoxFile(filePath, maxBytes) {
+  let handle;
+  try {
+    handle = await fs.open(filePath, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK);
+  } catch {
+    return ''; // missing, or a symlink (ELOOP): never followed
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return '';
+    const size = Math.max(0, Math.min(stat.size, maxBytes));
+    const buffer = Buffer.alloc(size);
+    const { bytesRead } = await handle.read(buffer, 0, size, 0);
+    return buffer.subarray(0, bytesRead).toString('utf-8');
+  } catch {
+    return '';
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+/** Writes a fresh regular file; whatever was at the path (e.g. a symlink) is removed, never followed. */
+export async function writeBoxFile(filePath, content) {
+  await fs.rm(filePath, { force: true });
+  const handle = await fs.open(filePath, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o644);
+  try {
+    await handle.writeFile(content ?? '');
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Throws when the tree contains symlinks or hard-linked files (extracted archives). */
+export async function assertNoLinks(dir) {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    const stat = await fs.lstat(full);
+    if (stat.isSymbolicLink()) throw new Error(`archive contains a symbolic link: ${entry.name}`);
+    if (stat.isDirectory()) await assertNoLinks(full);
+    else if (!stat.isFile()) throw new Error(`archive contains a special file: ${entry.name}`);
+    else if (stat.nlink > 1) throw new Error(`archive contains a hard link: ${entry.name}`);
+  }
+}
+
+// Output bytes read per stream: enough for maxOutputChars UTF-8 characters.
+const maxOutputBytes = () => maxOutputChars() * 4 + 64;
+
+/**
+ * Removes boxes left behind by a worker that crashed or was killed (round 2).
+ * They can hold other users' source code and testcase input, and box ids
+ * restart at 0 after a restart. Runs once at worker start, before any job;
+ * `isolate --cleanup` also kills anything still running in the box and
+ * removes its cgroup. Returns the ids it cleaned.
+ */
+export async function cleanupStaleBoxes({ boxRoot = process.env.ISOLATE_BOX_ROOT || '/var/local/lib/isolate' } = {}) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(boxRoot);
+  } catch {
+    return [];
+  }
+  const ids = entries.filter((name) => /^\d{1,4}$/.test(name)).map(Number);
+  for (const id of ids) {
+    try {
+      await execFileAsync('isolate', ['--cleanup', `--box-id=${id}`, '--cg']);
+    } catch (err) {
+      logger.warn({ event: 'stale_box_cleanup_failed', boxId: id, error: err.message });
+    }
+  }
+  if (ids.length) logger.info({ event: 'stale_boxes_cleaned', count: ids.length });
+  return ids;
+}
 
 // Atomic box-ID counter (0-999). Safe in single-threaded Node.js event loop.
 let nextBoxId = 0;
@@ -27,7 +111,8 @@ function hostCpuCount() {
 
 function truncate(text) {
   if (!text) return text;
-  return text.length > MAX_OUTPUT_CHARS ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n[truncated]` : text;
+  const max = maxOutputChars();
+  return text.length > max ? `${text.slice(0, max)}\n[truncated]` : text;
 }
 
 /**
@@ -107,13 +192,13 @@ class IsolateExecutor {
         await this.setupSource(workDir, submission);
         sourceReady = true;
         if (language.id === MULTI_FILE_LANGUAGE_ID) {
-          await fs.writeFile(stdinPath, submission.stdin || '');
+          await writeBoxFile(stdinPath, submission.stdin || '');
           return await this.executeMultiFile(boxId, workDir, submission);
         }
         for (const name of ['run', 'run.sh']) {
           try {
             await fs.access(path.join(workDir, name));
-            await fs.writeFile(stdinPath, submission.stdin || '');
+            await writeBoxFile(stdinPath, submission.stdin || '');
             return await this.executeMultiFile(boxId, workDir, submission);
           } catch { /* try next */ }
         }
@@ -124,7 +209,7 @@ class IsolateExecutor {
       if (!build.ok) return build.result;
 
       // ── Run ─────────────────────────────────────────────────────────
-      await fs.writeFile(stdinPath, submission.stdin || '');
+      await writeBoxFile(stdinPath, submission.stdin || '');
       let runCmd = language.run_cmd;
       if (submission.command_line_arguments) {
         runCmd += ` ${submission.command_line_arguments}`;
@@ -216,6 +301,12 @@ class IsolateExecutor {
 
       const results = new Array(total);
       const stopper = createGroupStopper(batch);
+      // Round 2: a batch may ask for a duration cap (max_duration_ms, clamped
+      // by the API). Once it has run that long, no further testcase starts;
+      // the rest come back skipped and the client decides what to run next.
+      // Bounds how long one request occupies a worker, whatever the code does.
+      const runStarted = Date.now();
+      const durationCap = Number(batch.max_duration_ms) > 0 ? Number(batch.max_duration_ms) : Infinity;
       let next = 0;
       const runLane = async ({ boxId: laneBoxId, boxDir: laneBoxDir }) => {
         const laneWorkDir = path.join(laneBoxDir, 'box');
@@ -226,10 +317,14 @@ class IsolateExecutor {
             results[index] = skippedResult(index);
             continue;
           }
+          if (Date.now() - runStarted >= durationCap) {
+            results[index] = { ...skippedResult(index), message: 'Skipped: the batch reached its duration cap' };
+            continue;
+          }
           await emptyDir(laneWorkDir);
           await emptyDir(path.join(laneBoxDir, 'tmp'));
           await copyBuildTree(snapshotDir, laneWorkDir);
-          await fs.writeFile(stdinPath, batch.testcases[index].stdin || '');
+          await writeBoxFile(stdinPath, batch.testcases[index].stdin || '');
 
           const run = await this.runIsolate(laneBoxId, laneWorkDir, {
             cmd: runCmd,
@@ -491,11 +586,11 @@ class IsolateExecutor {
       // isolate exits non-zero on TLE, RE, etc. — that's normal
     }
 
-    // Read outputs from HOST paths
-    let stdout = '';
-    let stderr = '';
-    try { stdout = await fs.readFile(hostStdoutPath, 'utf-8'); } catch { /* empty */ }
-    try { stderr = await fs.readFile(hostStderrPath, 'utf-8'); } catch { /* empty */ }
+    // Read outputs from HOST paths. Never follows a symlink, FIFO or device
+    // the program may have left in place of these files, and reads at most
+    // enough bytes for the configured output size (SA-H5).
+    const stdout = await readBoxFile(hostStdoutPath, maxOutputBytes());
+    const stderr = await readBoxFile(hostStderrPath, maxOutputBytes());
 
     // Parse meta file (isolate's precise measurements)
     const meta = await this.parseMeta(metaPath);
@@ -563,6 +658,10 @@ class IsolateExecutor {
 
       await execFileAsync('unzip', ['-n', '-qq', tmpZip, '-d', workDir]);
       await fs.unlink(tmpZip);
+      // unzip restores symlinks and this process runs as root: a link in the
+      // archive would redirect later host-side reads/writes (stdin, outputs,
+      // build-cache chmod) outside the box.
+      await assertNoLinks(workDir);
 
       logger.info({
         event: 'additional_files_extracted',

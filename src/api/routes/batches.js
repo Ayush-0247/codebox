@@ -5,7 +5,8 @@ import {
   sanitizeCompilerOptions,
   sanitizeCommandLineArgs,
 } from '../middleware/validation.js';
-import { addBatch, getBatch } from '../../queue/producer.js';
+import { addBatch, getBatch, deleteBatch } from '../../queue/producer.js';
+import { tenantFromRequest } from '../../queue/tenants.js';
 import { watchBatch } from '../../queue/batchEvents.js';
 import { getLanguageById } from '../../languages/index.js';
 import { decodeIfNeeded, encodeIfNeeded } from '../../utils/base64.js';
@@ -69,6 +70,8 @@ router.post('/', validateBatchExecution, async (req, res, next) => {
         group: tc.group,
       })),
       stop_on_failure: data.stop_on_failure,
+      // Never longer than the server's own cap (round 2).
+      max_duration_ms: Math.min(Number(data.max_duration_ms) || Infinity, config.batch.maxDurationMs),
       limits,
       // Compile step uses the same memory as the run (raised by language min_memory).
       memory_limit: limits.memory_limit,
@@ -78,7 +81,7 @@ router.post('/', validateBatchExecution, async (req, res, next) => {
       created_at: new Date().toISOString(),
     };
 
-    await addBatch(batch);
+    await addBatch(batch, { tenant: tenantFromRequest(req) });
 
     logger.info({
       event: 'batch_created',
@@ -159,5 +162,26 @@ async function sendBatch(batchId, req, res, next) {
  */
 router.get('/', (req, res, next) => sendBatch(req.query.batchId, req, res, next));
 router.get('/:batchId', (req, res, next) => sendBatch(req.params.batchId, req, res, next));
+
+/**
+ * DELETE /batches/:batchId
+ * Frees a batch's data from Redis once the client has read the results.
+ * Additive endpoint; older clients simply never call it.
+ */
+router.delete('/:batchId', async (req, res, next) => {
+  try {
+    const { batchId } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(batchId)) {
+      return res.status(400).json({ error: 'Bad Request', message: 'Invalid batchId' });
+    }
+    const deleted = await deleteBatch(batchId);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Not Found', message: `Batch ${batchId} not found` });
+    }
+    res.status(200).json({ message: 'Batch deleted' });
+  } catch (error) {
+    next(error);
+  }
+});
 
 export default router;

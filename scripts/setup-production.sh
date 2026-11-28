@@ -17,8 +17,14 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# Domain is optional. Without it, CodeBox serves plain HTTP on this server's IP.
+# Domain is required: CodeBox is served over HTTPS only (requests carry the
+# API token, users' source code and hidden testcase input).
 DOMAIN="${1:-}"
+if [ -z "$DOMAIN" ]; then
+    echo "Usage: $0 <domain>   (an A record for <domain> must point at this server)" >&2
+    echo "Plain HTTP on the server's IP is no longer supported." >&2
+    exit 1
+fi
 
 if [ -n "$DOMAIN" ]; then
     MODE="domain"

@@ -18,8 +18,9 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      # Blank/unset DOMAIN => ":80" => plain HTTP on the server's IP, no SSL.
-      - SITE_ADDRESS=${DOMAIN:-:80}
+      # DOMAIN is required: automatic HTTPS. Plain HTTP would expose the
+      # token, source code and testcase input in transit (SA-H3).
+      - "SITE_ADDRESS=${DOMAIN:?DOMAIN must be set to the hostname that points at this server (automatic HTTPS)}"
       - "METRICS_TOKEN=${METRICS_TOKEN:?METRICS_TOKEN must be set (generate one with openssl rand -hex 16)}"
     configs:
       - source: caddyfile
@@ -37,14 +38,17 @@ services:
           memory: ${CADDY_MEMORY:-128M}
 
   api:
-    image: ${CODEBOX_IMAGE_NAMESPACE:-hiteshchoudhary}/codebox-api:${CODEBOX_VERSION:-latest}
+    image: ${CODEBOX_IMAGE_NAMESPACE:?set CODEBOX_IMAGE_NAMESPACE to your own registry namespace (images run privileged)}/codebox-api:${CODEBOX_VERSION:?set CODEBOX_VERSION to a pinned image tag}
     environment:
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
       - "AUTH_TOKEN=${AUTH_TOKEN:?AUTH_TOKEN must be set - an empty token disables auth entirely}"
       - PORT=3000
-      - BODY_LIMIT=50mb
+      - BODY_LIMIT=${BODY_LIMIT:-8mb}
+      # One proxy (Caddy) in front of the API.
+      - TRUST_PROXY=1
       - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-200}
+      - RATE_LIMIT_UNAUTHENTICATED_MAX=${RATE_LIMIT_UNAUTHENTICATED_MAX:-60}
       # Same result TTL as the worker (the API writes submission:/batch: keys too).
       - RESULT_CACHE_TTL=${RESULT_CACHE_TTL:-1800}
       - QUEUE_KEEP_COMPLETED_AGE=${QUEUE_KEEP_COMPLETED_AGE:-600}
@@ -61,7 +65,7 @@ services:
           memory: ${API_MEMORY:-256M}
 
   worker:
-    image: ${CODEBOX_IMAGE_NAMESPACE:-hiteshchoudhary}/codebox-worker:${CODEBOX_VERSION:-latest}
+    image: ${CODEBOX_IMAGE_NAMESPACE:?set CODEBOX_IMAGE_NAMESPACE to your own registry namespace (images run privileged)}/codebox-worker:${CODEBOX_VERSION:?set CODEBOX_VERSION to a pinned image tag}
     command: node src/queue/worker.js
     privileged: true
     # isolate writes to /sys/fs/cgroup/cgroup.subtree_control; the host cgroup
@@ -72,6 +76,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - EXECUTOR_TYPE=isolate
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
+      # The Node.js worker drops root after cgroup setup (needs images built from this repository).
+      - WORKER_USER=${WORKER_USER-codebox}
       - DEFAULT_MEMORY_LIMIT=${DEFAULT_MEMORY_LIMIT:-256000}
       - MAX_MEMORY_LIMIT=${MAX_MEMORY_LIMIT:-512000}
       - RESULT_CACHE_TTL=${RESULT_CACHE_TTL:-1800}
@@ -102,7 +108,7 @@ services:
           memory: ${REDIS_MEMORY:-384M}
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.53.0
     configs:
       - source: prometheus_yml
         target: /etc/prometheus/prometheus.yml
@@ -120,7 +126,7 @@ services:
           memory: ${PROMETHEUS_MEMORY:-512M}
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.1.0
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
@@ -136,9 +142,8 @@ services:
 configs:
   caddyfile:
     content: |
-      # DOMAIN blank -> ":80" -> plain HTTP on the server IP, no certificate.
-      # DOMAIN set   -> that hostname -> automatic HTTPS via Let's Encrypt.
-      {$$SITE_ADDRESS::80} {
+      # SITE_ADDRESS is the DOMAIN hostname -> automatic HTTPS via Let's Encrypt.
+      {$$SITE_ADDRESS} {
           @metrics {
               path /metrics/*
               header X-Metrics-Token {$$METRICS_TOKEN}
@@ -149,6 +154,13 @@ configs:
           }
           handle /metrics/* {
               respond "Unauthorized" 401
+          }
+          # The API's own /metrics is for the internal Prometheus scrape only.
+          handle /metrics {
+              respond "Not Found" 404
+          }
+          request_body {
+              max_size 10MB
           }
 
           reverse_proxy api:3000

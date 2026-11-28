@@ -20,7 +20,13 @@ export async function copyBuildTree(srcDir, destDir) {
   await fs.cp(srcDir, destDir, {
     recursive: true,
     force: true,
-    filter: (src) => path.dirname(src) !== srcDir || !RUNTIME_FILES.has(path.basename(src)),
+    // Symlinks are never part of a build (SA-H5 defense in depth): a copied
+    // link would later be followed by root-owned file operations.
+    filter: async (src) => {
+      if (path.dirname(src) === srcDir && RUNTIME_FILES.has(path.basename(src))) return false;
+      const stat = await fs.lstat(src);
+      return !stat.isSymbolicLink();
+    },
   });
   await normalizePermissions(destDir);
 }
@@ -29,11 +35,13 @@ async function normalizePermissions(dir) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   await Promise.all(entries.map(async (entry) => {
     const full = path.join(dir, entry.name);
+    // Dirent types come from lstat semantics: symlinks are neither
+    // directories nor files here and are left alone (chmod would follow them).
     if (entry.isDirectory()) {
       await fs.chmod(full, 0o755);
       await normalizePermissions(full);
     } else if (entry.isFile()) {
-      const { mode } = await fs.stat(full);
+      const { mode } = await fs.lstat(full);
       await fs.chmod(full, (mode & 0o111) ? 0o755 : 0o644);
     }
   }));

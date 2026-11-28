@@ -88,6 +88,13 @@ RUN git clone --depth 1 --branch ${ISOLATE_VERSION} https://github.com/ioi/isola
 # ── 5. Create runner user (for non-isolate fallback) ───────────────────────
 RUN useradd -m -u 1001 -s /bin/bash runner
 
+# Unprivileged account for the Node.js worker itself: the entrypoint drops to
+# it when WORKER_USER=codebox (sandboxes are still created by the setuid
+# isolate binary). Owns the build cache.
+RUN useradd -r -M -u 1002 -s /usr/sbin/nologin codebox \
+    && mkdir -p /var/cache/codebox \
+    && chown codebox: /var/cache/codebox
+
 # ── 6. Application setup ───────────────────────────────────────────────────
 WORKDIR /app
 COPY package*.json ./

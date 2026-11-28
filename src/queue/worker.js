@@ -8,6 +8,8 @@ import { publishBatchDone } from './batchEvents.js';
 import { warmUpExecutor } from './warmup.js';
 import { getStatusById } from '../languages/index.js';
 import { jobRetentionOptions } from './producer.js';
+import { settleTenantJob, releaseTenantJob, jobCostMs } from './tenants.js';
+import { cleanupStaleBoxes } from '../executor/IsolateExecutor.js';
 
 let redis = null;
 let worker = null;
@@ -78,13 +80,37 @@ async function processBatchJob(job) {
   }));
   await publishBatchDone(redis, batch.batchId);
 
-  return { status: outcome.status };
+  // Per-case timings let the tenant be charged for the sandbox time used.
+  return { status: outcome.status, results: (outcome.results || []).map((r) => ({ timeMs: r.timeMs, wallTimeMs: r.wallTimeMs })) };
 }
 
 /**
  * Process a queue job
  */
 async function processJob(job) {
+  // Charge the tenant for the sandbox time this attempt used (round 2,
+  // SA-H2), whatever the outcome. The tenant's place is freed when the job is
+  // done for good: success here, final failure in the 'failed' handler.
+  const started = Date.now();
+  let outcome = null;
+  try {
+    outcome = await runJob(job);
+    return outcome;
+  } finally {
+    const tenant = job.data?.tenant;
+    if (tenant) {
+      const cost = jobCostMs({
+        results: outcome?.results,
+        timeSec: outcome?.time,
+        wallSec: outcome?.wall_time,
+        elapsedMs: Date.now() - started,
+      });
+      await settleTenantJob(redis, tenant, job.id, cost, { release: outcome !== null, logger });
+    }
+  }
+}
+
+async function runJob(job) {
   if (job.name === 'batch') return processBatchJob(job);
 
   const submission = job.data;
@@ -147,6 +173,10 @@ export async function startWorker() {
     logger.info('Worker connected to Redis');
   });
 
+  // A previous worker may have died mid-job: remove its boxes (and anything
+  // still running in them) before taking new work.
+  if (config.executor.type === 'isolate') await cleanupStaleBoxes();
+
   worker = new Worker('submissions', processJob, {
     connection: redis,
     concurrency: config.worker.concurrency,
@@ -163,6 +193,10 @@ export async function startWorker() {
   });
 
   worker.on('failed', (job, err) => {
+    // Out of attempts: the job will not run again, so its tenant place is freed.
+    if (job?.data?.tenant && job.attemptsMade >= (job.opts?.attempts || 1)) {
+      releaseTenantJob(redis, job.data.tenant, job.id);
+    }
     logger.error({
       event: 'worker_job_failed',
       jobId: job?.id,

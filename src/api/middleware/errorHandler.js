@@ -1,17 +1,36 @@
 import logger from '../../utils/logger.js';
+import { TenantLimitError } from '../../queue/tenants.js';
 
 /**
  * Global error handling middleware
  */
 export function errorHandler(err, req, res, next) {
-  // Log the error
+  // Per-tenant admission (round 2): expected answers, not server errors, so
+  // they are not logged one line per request.
+  if (err instanceof TenantLimitError) {
+    if (err.retryAfterSeconds) res.set('Retry-After', String(err.retryAfterSeconds));
+    return res.status(err.status).json({
+      error: err.status === 503 ? 'Service Unavailable' : err.status === 400 ? 'Bad Request' : 'Too Many Requests',
+      code: err.code,
+      message: err.message,
+      ...(err.retryAfterSeconds ? { retryAfter: err.retryAfterSeconds } : {}),
+    });
+  }
+
+  // Log the error. Never the body: it holds users' source code and testcase
+  // input (privacy, and multi-megabyte log lines).
   logger.error({
-    err,
+    err: { name: err?.name, message: err?.message, type: err?.type, statusCode: err?.statusCode },
     method: req.method,
-    url: req.url,
-    body: req.body,
+    path: req.path,
+    bodyBytes: Number(req.get?.('content-length')) || undefined,
     ip: req.ip,
+    client: req.clientId,
   });
+
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Payload Too Large', message: 'Request body is too large' });
+  }
 
   // Handle specific error types
   if (err.name === 'ValidationError') {
